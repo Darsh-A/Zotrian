@@ -1,5 +1,15 @@
 {
-  "vault_path": "/home/ardo/mlem/Vaults/Thesis/thesis_vault/Summaries",
-  "zotero_db_path": "/home/ardo/Zotero/zotero.sqlite",
-  "watch_interval_seconds": 5
+  "zotero": {
+    "database_path": "~/Zotero/zotero.sqlite",
+    "storage_path": "~/Zotero/storage"
+  },
+  "obsidian": {
+    "vault_path": "~/mlem/Vaults/Thesis/thesis_vault",
+    "paper_notes_dir": "Summaries"
+  },
+  "watch": {
+    "interval_seconds": 5,
+    "debounce_seconds": 2
+  },
+  "state_path": ".zotrian-state.json"
 }
