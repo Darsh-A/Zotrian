@@ -3,5 +3,5 @@ __pycache__/
 *.pyc
 *.egg-info/
 .zotrian-state.json
-Papers/
-Concepts/
+DIRECTION.md
+.opencode

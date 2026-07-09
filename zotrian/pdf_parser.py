@@ -105,4 +105,4 @@ class PDFParser:
                     return candidate_sections[0][1]
                 return candidate_sections[-1][1]
             current_page -= 1
-        return "General Notes"
+        return "Abstract"

@@ -92,9 +92,31 @@ def apply_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
     return config
 
 
+def confirm_no_toc(exporter: Exporter, paper_filter: str | None, action_name: str) -> bool:
+    if not paper_filter:
+        return True
+
+    missing_toc_titles: list[str] = []
+    for paper in exporter.db.get_papers(paper_filter=paper_filter):
+        parser = exporter.load_parser(paper.get("pdf_path"))
+        if not parser or not parser.toc or len(parser.toc) < 2:
+            missing_toc_titles.append(paper.get("title") or paper.get("citekey") or paper.get("key") or "Untitled")
+
+    if not missing_toc_titles:
+        return True
+
+    print("Warning: no usable table of contents was detected for:")
+    for title in missing_toc_titles:
+        print(f"  - {title}")
+    response = input(f"Continue with {action_name} anyway? [y/N] ").strip().lower()
+    return response in {"y", "yes"}
+
+
 def run_convert(exporter: Exporter, paper_filter: str | None) -> int:
     if not paper_filter:
         print("No paper title provided. Use --paper to convert a specific paper.")
+        return 0
+    if not confirm_no_toc(exporter, paper_filter, "convert"):
         return 0
     changed = exporter.run(paper_filter=paper_filter)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -107,6 +129,8 @@ def run_convert(exporter: Exporter, paper_filter: str | None) -> int:
 def run_watch(exporter: Exporter, paper_filter: str | None, config: AppConfig) -> int:
     if not paper_filter:
         print("No paper title provided. Use --paper to watch a specific paper.")
+        return 0
+    if not confirm_no_toc(exporter, paper_filter, "watch"):
         return 0
     changed = exporter.run(paper_filter=paper_filter)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")

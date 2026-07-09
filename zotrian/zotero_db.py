@@ -164,17 +164,20 @@ class ZoteroDB:
         for attach_row in attach_rows:
             attach_id = attach_row[0]
             ann_query = """
-                SELECT text, comment, color, pageLabel, position, items.key
-                FROM itemAnnotations
-                JOIN items ON itemAnnotations.itemID = items.itemID
-                WHERE parentItemID = ?
-                ORDER BY sortIndex
+                SELECT ia.itemID, ia.text, ia.comment, ia.color, ia.pageLabel, ia.position, it.key
+                FROM itemAnnotations ia
+                JOIN items it ON ia.itemID = it.itemID
+                WHERE ia.parentItemID = ?
+                ORDER BY ia.sortIndex
             """
             for row in cursor.execute(ann_query, (attach_id,)).fetchall():
-                text, comment, color, page_label, position, annotation_key = row
-                image_path = self.get_annotation_image_path(annotation_key)
+                annotation_id, text, comment, color, page_label, position, zotero_key = row
+                annotation_key = str(annotation_id) if annotation_id is not None else None
+                image_key = zotero_key if zotero_key else annotation_key
+                image_path = self.get_annotation_image_path(image_key)
                 annotations.append(
                     {
+                        "key": annotation_key,
                         "text": text,
                         "comment": comment,
                         "color": color,

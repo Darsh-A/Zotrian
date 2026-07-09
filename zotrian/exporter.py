@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import AppConfig
+from .latex_cleaner import clean_annotation_text
+from .note_merger import (
+    ANNOT_MARKER_RE,
+    extract_user_sections,
+    inject_user_sections,
+    parse_annotation_markers,
+)
 from .zotero_db import ZoteroDB
 
 
@@ -18,6 +25,17 @@ COLOR_MAP = {
     "#5fb236": "green",
     "#ff6666": "red",
     "#2ea8e5": "blue",
+    "#e56eee": "magenta",
+    "#f19837": "orange",
+    "#aaaaaa": "gray",
+}
+
+HEADING_COLORS = frozenset({"magenta", "orange", "gray"})
+
+HEADING_LEVELS = {
+    "magenta": 2,
+    "orange": 3,
+    "gray": 4,
 }
 
 
@@ -58,7 +76,8 @@ class Annotation:
     page: str | None
     position: dict[str, Any] | None
     image_path: str | None = None
-    section: str = "General Notes"
+    section: str = "Abstract"
+    annot_key: str = ""
 
 
 class NoteRenderer:
@@ -71,8 +90,16 @@ class NoteRenderer:
     def render_section_heading(self, section: str) -> str:
         return f"{'#' * self.section_heading_level(section)} {section}"
 
-    def render_annotation(self, ann: Annotation) -> str:
+    def render_annotation(self, ann: Annotation, preserved: str | None = None) -> str:
+        if preserved is not None:
+            marker = f"<!-- zt:{ann.annot_key} -->"
+            if preserved.startswith(marker):
+                return preserved
+            return f"{marker}\n\n{preserved}"
+
         kind = normalize_color(ann.color)
+        if kind in HEADING_COLORS:
+            return ""
         body = (ann.text or "").strip()
         comment = (ann.comment or "").strip()
 
@@ -81,28 +108,27 @@ class NoteRenderer:
             parts = [f"#### [[{heading}]]", ""]
             if body:
                 parts.append(body)
-            return "\n".join(parts).strip()
-
-        if kind == "green":
-            return f"> {body or comment}".rstrip()
-
-        if kind == "red":
+            content = "\n".join(parts).strip()
+        elif kind == "green":
+            content = f"> {body or comment}".rstrip()
+        elif kind == "red":
             parts = ["> [!danger]"]
             if comment:
                 parts.append(f"> {comment}")
             if body:
                 parts.append(f"> {body}")
-            return "\n".join(parts).strip()
-
-        if kind == "blue":
+            content = "\n".join(parts).strip()
+        elif kind == "blue":
             image_path = Path(ann.image_path).expanduser() if ann.image_path else None
             if image_path and image_path.exists():
-                parts = [f"![Blue annotation]({image_path.resolve().as_uri()})"]
+                content = f"![Blue annotation]({image_path.resolve().as_uri()})"
             else:
-                parts = ["$$", body or comment, "$$"]
-            return "\n".join(parts).strip()
+                return ""
+        else:
+            content = body or comment
 
-        return body or comment
+        marker = f"<!-- zt:{ann.annot_key} -->"
+        return f"{marker}\n\n{content}"
 
     def render_frontmatter(self, paper: dict[str, Any]) -> list[str]:
         authors = paper.get("authors") or []
@@ -132,7 +158,17 @@ class NoteRenderer:
         lines.append("---")
         return lines
 
-    def render_paper(self, paper: dict[str, Any], annotations: list[Annotation], outline: list[str] | None = None) -> str:
+    def render_paper(
+        self,
+        paper: dict[str, Any],
+        annotations: list[Annotation],
+        outline: list[str] | None = None,
+        heading_color_map: dict[str, str] | None = None,
+        existing_note_content: str | None = None,
+        existing_annotations: dict[str, str] | None = None,
+    ) -> str:
+        color_map = heading_color_map or {}
+        preserved = existing_annotations or {}
         parts = self.render_frontmatter(paper)
         parts.extend(
             [
@@ -147,44 +183,68 @@ class NoteRenderer:
                 "## Thesis Relevance",
                 "---",
                 "",
-                "## Thesis Notes",
+                "## Abstract",
                 "",
             ]
         )
 
+        if existing_note_content:
+            extracted = extract_user_sections(existing_note_content)
+            if extracted:
+                parts = inject_user_sections(parts, extracted)
+
         grouped: dict[str, list[Annotation]] = {}
         for annotation in annotations:
             rendered = self.render_annotation(annotation)
-            if not rendered:
+            if not rendered and not annotation.annot_key:
                 continue
-            grouped.setdefault(annotation.section or "General Notes", []).append(annotation)
+            grouped.setdefault(annotation.section or "Abstract", []).append(annotation)
+
+        abstract_anns = grouped.pop("Abstract", [])
 
         ordered_sections: list[str] = []
         if outline:
             for section in outline:
-                if section in grouped and section not in ordered_sections:
+                if section not in ordered_sections:
                     ordered_sections.append(section)
         for section in grouped:
             if section not in ordered_sections:
                 ordered_sections.append(section)
 
-        if not ordered_sections:
-            ordered_sections = ["General Notes"]
+        if abstract_anns:
+            for annotation in abstract_anns:
+                content = self.render_annotation(annotation, preserved=preserved.get(annotation.annot_key))
+                parts.append(content)
+                parts.append("")
+
+        if ordered_sections:
+            parts.extend(["", "## Thesis Notes", ""])
 
         for section in ordered_sections:
-            parts.extend([self.render_section_heading(section), ""])
-            for annotation in grouped.get(section, []):
-                parts.append(self.render_annotation(annotation))
+            anns = grouped.get(section, [])
+            heading_color = color_map.get(section)
+            if heading_color:
+                level = HEADING_LEVELS.get(heading_color, self.section_heading_level(section))
+                parts.extend([f"{'#' * level} {section}", ""])
+            else:
+                parts.extend([self.render_section_heading(section), ""])
+            for annotation in anns:
+                content = self.render_annotation(annotation, preserved=preserved.get(annotation.annot_key))
+                parts.append(content)
                 parts.append("")
 
         return "\n".join(parts).rstrip() + "\n"
 
+
 class SyncState:
     def __init__(self, path: Path):
         self.path = path
-        self.data = {"papers": {}}
+        self.data: dict = {"papers": {}}
         if path.exists():
-            self.data = json.loads(path.read_text())
+            try:
+                self.data = json.loads(path.read_text())
+            except json.JSONDecodeError:
+                self.data = {"papers": {}}
 
     def get_paper(self, key: str) -> dict[str, Any]:
         return self.data.get("papers", {}).get(key, {})
@@ -198,7 +258,7 @@ class SyncState:
 
 
 class Exporter:
-    render_version = "5"
+    render_version = "6"
 
     def __init__(self, config: AppConfig):
         self.config = config
@@ -211,17 +271,41 @@ class Exporter:
         self.paper_dir = config.obsidian.paper_notes_path
         self.paper_dir.mkdir(parents=True, exist_ok=True)
 
+    def _annotation_page_index(self, ann: dict[str, Any]) -> int:
+        position = ann.get("position") or {}
+        page_index = position.get("pageIndex")
+        if page_index is not None:
+            return int(page_index)
+        try:
+            return max(int(ann.get("page", "1")) - 1, 0)
+        except Exception:
+            return 0
+
+    def _assign_sections_from_headings(
+        self,
+        all_annotations: list[Annotation],
+        heading_color_map: dict[str, str],
+    ) -> None:
+        current_section = "Abstract"
+        for ann in all_annotations:
+            kind = normalize_color(ann.color)
+            title = (ann.text or ann.comment or "").strip()
+            if kind in HEADING_COLORS and title:
+                current_section = title
+                heading_color_map[title] = kind
+            else:
+                ann.section = current_section
+
     def annotation_section(self, parser: Any | None, ann: dict[str, Any]) -> str:
         if not parser:
-            return "General Notes"
-
+            return "Abstract"
         position = ann.get("position") or {}
         page_index = position.get("pageIndex")
         if page_index is None:
             try:
                 page_index = max(int(ann.get("page", "1")) - 1, 0)
             except Exception:
-                return "General Notes"
+                return "Abstract"
         return parser.get_section_for_annotation(page_index, position)
 
     def digest_for_paper(
@@ -262,31 +346,77 @@ class Exporter:
         paper["citekey"] = paper.get("citekey") or stable_key
 
         parser = self.load_parser(paper.get("pdf_path"))
-        annotations: list[Annotation] = []
+
+        all_annotations: list[Annotation] = []
+        heading_color_map: dict[str, str] = {}
+
         for raw in paper.get("annotations", []):
-            annotation = Annotation(
+            color = raw.get("color") or ""
+            kind = normalize_color(color)
+            ann = Annotation(
                 text=raw.get("text") or "",
                 comment=raw.get("comment"),
-                color=raw.get("color") or "",
+                color=color,
                 page=raw.get("page"),
                 position=raw.get("position"),
                 image_path=raw.get("image_path"),
+                annot_key=str(raw.get("key", "")),
             )
-            annotation.section = self.annotation_section(parser, raw)
-            annotations.append(annotation)
+            if kind in HEADING_COLORS:
+                title = (ann.text or ann.comment or "").strip()
+                if title:
+                    heading_color_map[title] = kind
+            all_annotations.append(ann)
+
+        content_annotations = [a for a in all_annotations if normalize_color(a.color) not in HEADING_COLORS]
+        heading_annotations = [a for a in all_annotations if normalize_color(a.color) in HEADING_COLORS]
+
+        has_toc = parser is not None and parser.toc and len(parser.toc) >= 2
+
+        if has_toc:
+            content_raws = [raw for raw in paper.get("annotations", [])
+                           if normalize_color(raw.get("color")) not in HEADING_COLORS]
+            for idx, ann in enumerate(content_annotations):
+                ann.section = self.annotation_section(parser, content_raws[idx])
+        else:
+            self._assign_sections_from_headings(all_annotations, heading_color_map)
 
         outline: list[str] = []
-        if parser:
+        if has_toc and parser:
             for _, items in sorted(parser.sections.items()):
-                outline.extend([title for _, title in items])
+                for _, title in items:
+                    if title not in outline:
+                        outline.append(title)
+        for ann in heading_annotations:
+            title = (ann.text or ann.comment or "").strip()
+            if title and title not in outline:
+                outline.append(title)
 
-        digest = self.digest_for_paper(paper, note_title, annotations, outline)
+        for ann in content_annotations:
+            ann.text = clean_annotation_text(ann.text)
+
+        all_annotations = content_annotations + heading_annotations
+        digest = self.digest_for_paper(paper, note_title, all_annotations, outline)
         previous_state = self.state.get_paper(stable_key)
         if previous_state.get("hash") == digest:
             return False, note_title
 
         note_path = self.paper_dir / note_filename
-        note_path.write_text(self.renderer.render_paper(paper, annotations, outline))
+        existing_content = None
+        existing_annotations: dict[str, str] = {}
+        if note_path.exists():
+            existing_content = note_path.read_text()
+            existing_annotations = parse_annotation_markers(existing_content)
+
+        content = self.renderer.render_paper(
+            paper,
+            content_annotations,
+            outline,
+            heading_color_map=heading_color_map,
+            existing_note_content=existing_content,
+            existing_annotations=existing_annotations,
+        )
+        note_path.write_text(content)
 
         previous_note_path = previous_state.get("note_path")
         if previous_note_path and previous_note_path != str(note_path):
