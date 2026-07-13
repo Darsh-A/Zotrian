@@ -18,7 +18,7 @@ def _clean_annotation_content(lines: list[str]) -> str | None:
     cleaned = []
     for i in range(start, end + 1):
         stripped = lines[i].strip()
-        if HEADING_RE.match(stripped) or stripped in ("## Thesis Notes", "## Abstract", "---"):
+        if HEADING_RE.match(stripped) or stripped in ("## Thesis Notes", "### Abstract", "---"):
             continue
         cleaned.append(lines[i])
     result = "\n".join(cleaned).strip()

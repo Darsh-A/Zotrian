@@ -183,8 +183,6 @@ class NoteRenderer:
                 "## Thesis Relevance",
                 "---",
                 "",
-                "## Abstract",
-                "",
             ]
         )
 
@@ -200,9 +198,9 @@ class NoteRenderer:
                 continue
             grouped.setdefault(annotation.section or "Abstract", []).append(annotation)
 
-        abstract_anns = grouped.pop("Abstract", [])
-
         ordered_sections: list[str] = []
+        if "Abstract" in grouped and grouped["Abstract"]:
+            ordered_sections.append("Abstract")
         if outline:
             for section in outline:
                 if section not in ordered_sections:
@@ -210,12 +208,6 @@ class NoteRenderer:
         for section in grouped:
             if section not in ordered_sections:
                 ordered_sections.append(section)
-
-        if abstract_anns:
-            for annotation in abstract_anns:
-                content = self.render_annotation(annotation, preserved=preserved.get(annotation.annot_key))
-                parts.append(content)
-                parts.append("")
 
         if ordered_sections:
             parts.extend(["", "## Thesis Notes", ""])

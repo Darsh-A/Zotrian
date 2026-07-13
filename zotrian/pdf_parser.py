@@ -31,6 +31,18 @@ class PDFParser:
                     point = dest["to"]
                     if hasattr(point, "y"):
                         y_coord = point.y
+                    elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                        y_coord = point[1]
+                elif isinstance(dest, dict) and "dest" in dest:
+                    # Parse /FitR left top right bottom or /XYZ left top zoom
+                    dest_str = dest["dest"]
+                    if isinstance(dest_str, str):
+                        parts = dest_str.split()
+                        if len(parts) >= 3 and parts[0] in ("/FitR", "/XYZ"):
+                            try:
+                                y_coord = float(parts[2])  # top y-coordinate
+                            except ValueError:
+                                pass
                 section_map.setdefault(page_num, []).append((y_coord, title))
 
         if not self.toc or len(self.toc) < 2:
@@ -42,7 +54,7 @@ class PDFParser:
             raise NoHeadingsDetectedError("Could not detect any structured headings or ToC.")
 
         for page in section_map:
-            section_map[page].sort(key=lambda item: item[0])
+            section_map[page].sort(key=lambda item: item[0], reverse=True)
 
         return section_map
 
@@ -99,10 +111,15 @@ class PDFParser:
             if current_page in self.sections and self.sections[current_page]:
                 candidate_sections = self.sections[current_page]
                 if current_page == page_index:
-                    valid_sections = [section for section in candidate_sections if section[0] <= y_coord + 20]
-                    if valid_sections:
-                        return valid_sections[-1][1]
-                    return candidate_sections[0][1]
-                return candidate_sections[-1][1]
+                    # Find the nearest heading ABOVE this annotation on the current page.
+                    # In PDF coordinates, higher y = closer to page top = earlier in reading order.
+                    # A heading is "above" the annotation if its y is greater than the annotation's y.
+                    preceding = [s for s in candidate_sections if s[0] > y_coord - 20]
+                    if preceding:
+                        # Descending sort (highest y first); last element is the nearest heading above.
+                        return preceding[-1][1]
+                    # Annotation is above all headings on this page; look at previous pages.
+                else:
+                    return candidate_sections[-1][1]
             current_page -= 1
         return "Abstract"
