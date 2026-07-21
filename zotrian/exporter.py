@@ -376,7 +376,7 @@ class Exporter:
         outline: list[str] = []
         if has_toc and parser:
             for _, items in sorted(parser.sections.items()):
-                for _, title in items:
+                for _, _, title in items:
                     if title not in outline:
                         outline.append(title)
         for ann in heading_annotations:
@@ -388,12 +388,12 @@ class Exporter:
             ann.text = clean_annotation_text(ann.text)
 
         all_annotations = content_annotations + heading_annotations
+        note_path = self.paper_dir / note_filename
         digest = self.digest_for_paper(paper, note_title, all_annotations, outline)
         previous_state = self.state.get_paper(stable_key)
-        if previous_state.get("hash") == digest:
+        if previous_state.get("hash") == digest and note_path.exists():
             return False, note_title
 
-        note_path = self.paper_dir / note_filename
         existing_content = None
         existing_annotations: dict[str, str] = {}
         if note_path.exists():
