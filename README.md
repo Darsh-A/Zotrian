@@ -33,6 +33,7 @@ Useful variants:
 uv run zotrian convert --paper "How Many Elements Matter?"
 uv run zotrian convert --config zotrian.json
 uv run zotrian convert --vault /path/to/vault
+uv run zotrian convert-ai --paper "How Many Elements Matter?"
 ```
 
 You can also run it as a module:
@@ -64,6 +65,16 @@ The default config file is `zotrian.json`:
     "interval_seconds": 5,
     "debounce_seconds": 2
   },
+  "ai": {
+    "enabled": false,
+    "provider": "gemini",
+    "model": "gemini-2.5-flash-lite",
+    "api_key_env": "GEMINI_API_KEY",
+    "batch_size": 20,
+    "max_output_tokens": 2048,
+    "temperature": 0.2,
+    "request_timeout_seconds": 45
+  },
   "state_path": ".zotrian-state.json"
 }
 ```
@@ -74,6 +85,29 @@ Path overrides are also available at the CLI:
 - `--vault`
 - `--db`
 - `--storage`
+- `--ai`
+- `--no-ai`
+
+## AI Cleaning
+
+Zotrian can optionally rewrite extracted annotations into cleaner notes using Gemini.
+
+- The deterministic PDF parsing and section placement stay the same.
+- Only note content is rewritten.
+- Results are cached per annotation key and prompt signature, so repeated syncs only re-send changed annotations.
+- When AI mode is enabled, annotation blocks are regenerated from AI output instead of preserving previous per-annotation note edits.
+
+Set an API key before using AI mode:
+
+```bash
+export GEMINI_API_KEY=your_key_here
+```
+
+Enable AI mode in either place:
+
+- Config: set `"ai.enabled": true`
+- CLI: pass `--ai`
+- Convenience commands: `convert-ai` and `watch-ai`
 
 ## Commands
 
@@ -87,12 +121,16 @@ Convert only one matching paper:
 
 ```bash
 uv run zotrian convert --paper "The most metal poor stars"
+uv run zotrian convert --paper "The most metal poor stars" --ai
+uv run zotrian convert-ai --paper "The most metal poor stars"
 ```
 
 Watch Zotero for annotation/database changes:
 
 ```bash
 uv run zotrian watch --paper "The most metal poor stars"
+uv run zotrian watch --paper "The most metal poor stars" --ai
+uv run zotrian watch-ai --paper "The most metal poor stars"
 ```
 
 If `--paper` is omitted, Zotrian exits without converting the full library.

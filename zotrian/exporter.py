@@ -8,10 +8,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig
-from .latex_cleaner import clean_annotation_text
+from .config import AISettings, AppConfig
+from .gemini_cleaner import AICleaningError, AICleaner, CleaningCandidate
 from .note_merger import (
-    ANNOT_MARKER_RE,
     extract_user_sections,
     inject_user_sections,
     parse_annotation_markers,
@@ -100,8 +99,21 @@ class NoteRenderer:
         kind = normalize_color(ann.color)
         if kind in HEADING_COLORS:
             return ""
+
+        # Blue annotations are image-only (no body/comment required)
+        if kind == "blue":
+            image_path = Path(ann.image_path).expanduser() if ann.image_path else None
+            if image_path and image_path.exists():
+                content = f"![Blue annotation]({image_path.resolve().as_uri()})"
+                marker = f"<!-- zt:{ann.annot_key} -->"
+                return f"{marker}\n\n{content}"
+            return ""
+
         body = (ann.text or "").strip()
         comment = (ann.comment or "").strip()
+
+        if not body and not comment:
+            return ""
 
         if kind == "purple":
             heading = comment or "Definition"
@@ -118,14 +130,11 @@ class NoteRenderer:
             if body:
                 parts.append(f"> {body}")
             content = "\n".join(parts).strip()
-        elif kind == "blue":
-            image_path = Path(ann.image_path).expanduser() if ann.image_path else None
-            if image_path and image_path.exists():
-                content = f"![Blue annotation]({image_path.resolve().as_uri()})"
-            else:
-                return ""
         else:
             content = body or comment
+
+        if not content.strip():
+            return ""
 
         marker = f"<!-- zt:{ann.annot_key} -->"
         return f"{marker}\n\n{content}"
@@ -194,7 +203,7 @@ class NoteRenderer:
         grouped: dict[str, list[Annotation]] = {}
         for annotation in annotations:
             rendered = self.render_annotation(annotation)
-            if not rendered and not annotation.annot_key:
+            if not rendered:
                 continue
             grouped.setdefault(annotation.section or "Abstract", []).append(annotation)
 
@@ -250,7 +259,7 @@ class SyncState:
 
 
 class Exporter:
-    render_version = "6"
+    render_version = "7"
 
     def __init__(self, config: AppConfig):
         self.config = config
@@ -262,6 +271,12 @@ class Exporter:
         self.renderer = NoteRenderer()
         self.paper_dir = config.obsidian.paper_notes_path
         self.paper_dir.mkdir(parents=True, exist_ok=True)
+        self.ai_cleaner = self._build_ai_cleaner(config.ai)
+
+    def _build_ai_cleaner(self, settings: AISettings) -> AICleaner | None:
+        if not settings.enabled:
+            return None
+        return AICleaner(settings)
 
     def _annotation_page_index(self, ann: dict[str, Any]) -> int:
         position = ann.get("position") or {}
@@ -288,6 +303,94 @@ class Exporter:
             else:
                 ann.section = current_section
 
+    def _assign_sections_by_reading_order(
+        self,
+        content_annotations: list[Annotation],
+        heading_positions: list[tuple],
+        parser: Any | None = None,
+    ) -> None:
+        """Assign sections using a virtual-page reading-order sweep.
+
+        Each physical page is split at its width midpoint into two virtual
+        pages: left half = page*2, right half = page*2+1.  Headings and
+        annotations are then sorted by (virtual_page, y), which naturally
+        respects two-column reading order without fragile column detection.
+
+        heading_positions elements can be either:
+          - 5-tuple: (page, x_left, y_top, title, toc_index) — from font detection
+          - 4-tuple: (page, y_top, title, toc_index) — from text search fallback
+        """
+        # --- Virtual page helpers ---
+        def _page_width(page_index: int) -> float:
+            if parser is None or page_index < 0 or page_index >= len(parser.doc):
+                return 0.0
+            return float(parser.doc[page_index].rect.width)
+
+        def heading_virtual(h: tuple) -> tuple[int, float]:
+            page = h[0]
+            pw = _page_width(page)
+            if len(h) == 5:
+                x = h[1]
+                y = h[2]
+            else:
+                x = 0.0  # no x info → assume left column
+                y = h[1]
+            vp = page * 2 if pw <= 0 or x < pw / 2 else page * 2 + 1
+            return (vp, y)
+
+        # --- Build annotation events: (virtual_page, fitz_y_top, annotation) ---
+        ann_events: list[tuple[int, float, Annotation]] = []
+        for ann in content_annotations:
+            position = ann.position or {}
+            page_index = position.get("pageIndex")
+            if page_index is None:
+                try:
+                    page_index = max(int(ann.page or "1") - 1, 0)
+                except (ValueError, TypeError):
+                    page_index = 0
+
+            y_coord = 0.0
+            x_coord = 0.0
+            rects = position.get("rects") or []
+            if rects:
+                y_coord = min(rect[1] for rect in rects if len(rect) >= 2)
+                x_coord = min(rect[0] for rect in rects if len(rect) >= 1)
+
+            # Convert Zotero PDF bottom-left coords to fitz top-left coords
+            if parser is not None:
+                page_h = parser._page_height(page_index)
+                if page_h > 0:
+                    y_coord = page_h - y_coord
+
+            pw = _page_width(page_index)
+            vp = page_index * 2 if pw <= 0 or x_coord < pw / 2 else page_index * 2 + 1
+            ann_events.append((vp, y_coord, ann))
+
+        # Sort by (virtual_page, y) — top-to-bottom within each virtual page
+        ann_events.sort(key=lambda x: (x[0], x[1]))
+
+        # Sort headings by (virtual_page, y)
+        sorted_headings = sorted(heading_positions, key=lambda h: heading_virtual(h))
+
+        # Sweep: walk annotations in reading order, advancing heading pointer
+        current_section = "Abstract"
+        h_idx = 0
+
+        for vp_ann, y_ann, ann in ann_events:
+            while h_idx < len(sorted_headings):
+                h = sorted_headings[h_idx]
+                vp_h, y_h = heading_virtual(h)
+
+                # Heading precedes annotation if earlier virtual page,
+                # or same virtual page with y <= annotation y (with tolerance)
+                precedes = vp_h < vp_ann or (vp_h == vp_ann and y_h <= y_ann + 5)
+                if precedes:
+                    current_section = h[3] if len(h) == 5 else h[2]  # title
+                    h_idx += 1
+                else:
+                    break
+            ann.section = current_section
+
     def annotation_section(self, parser: Any | None, ann: dict[str, Any]) -> str:
         if not parser:
             return "Abstract"
@@ -299,6 +402,96 @@ class Exporter:
             except Exception:
                 return "Abstract"
         return parser.get_section_for_annotation(page_index, position)
+
+    def _content_ai_candidates(self, annotations: list[Annotation]) -> list[CleaningCandidate]:
+        candidates: list[CleaningCandidate] = []
+        for annotation in annotations:
+            kind = normalize_color(annotation.color)
+            if kind in HEADING_COLORS or kind == "blue":
+                continue
+            text = (annotation.text or "").strip()
+            comment = (annotation.comment or "").strip() or None
+            if not text and not comment:
+                continue
+            candidates.append(
+                CleaningCandidate(
+                    annot_key=annotation.annot_key,
+                    section=annotation.section or "Abstract",
+                    page=annotation.page,
+                    color=kind,
+                    text=text,
+                    comment=comment,
+                )
+            )
+        return candidates
+
+    def _apply_ai_cleaning(
+        self,
+        paper: dict[str, Any],
+        stable_key: str,
+        annotations: list[Annotation],
+    ) -> None:
+        if not self.ai_cleaner:
+            return
+
+        previous_state = self.state.get_paper(stable_key)
+        cache = dict(previous_state.get("ai_cache") or {})
+        candidates = self._content_ai_candidates(annotations)
+        if not candidates:
+            return
+
+        cleaned_by_key: dict[str, str] = {}
+        pending: list[CleaningCandidate] = []
+        for candidate in candidates:
+            signature = self.ai_cleaner.input_signature(candidate)
+            cached = cache.get(candidate.annot_key)
+            if (
+                isinstance(cached, dict)
+                and cached.get("signature") == signature
+                and isinstance(cached.get("cleaned_text"), str)
+                and cached.get("cleaned_text")
+            ):
+                cleaned_by_key[candidate.annot_key] = cached["cleaned_text"]
+            else:
+                pending.append(candidate)
+
+        batch_size = max(self.config.ai.batch_size, 1)
+        merged_secondary: set[str] = set()
+        for start in range(0, len(pending), batch_size):
+            batch = pending[start : start + batch_size]
+            cleaned_batch = self.ai_cleaner.clean_batch(paper, batch)
+
+            individual_map: dict[str, str] = {}
+            for composite_key, cleaned_text in cleaned_batch.items():
+                keys = [k.strip() for k in composite_key.split(",") if k.strip()]
+                if not keys or not cleaned_text:
+                    continue
+                for k in keys:
+                    individual_map[k] = cleaned_text
+                if len(keys) > 1:
+                    merged_secondary.update(keys[1:])
+
+            for candidate in batch:
+                cleaned_text = individual_map.get(candidate.annot_key)
+                if not cleaned_text:
+                    continue
+                cleaned_by_key[candidate.annot_key] = cleaned_text
+                cache[candidate.annot_key] = {
+                    "signature": self.ai_cleaner.input_signature(candidate),
+                    "cleaned_text": cleaned_text,
+                }
+
+        for annotation in annotations:
+            key = annotation.annot_key
+            if key in merged_secondary:
+                annotation.text = ""
+                annotation.comment = None
+            elif key in cleaned_by_key:
+                annotation.text = cleaned_by_key[key]
+
+        paper_cache = dict(previous_state)
+        paper_cache["ai_cache"] = cache
+        self.state.update_paper(stable_key, paper_cache)
 
     def digest_for_paper(
         self,
@@ -365,27 +558,32 @@ class Exporter:
 
         has_toc = parser is not None and parser.toc and len(parser.toc) >= 2
 
-        if has_toc:
-            content_raws = [raw for raw in paper.get("annotations", [])
-                           if normalize_color(raw.get("color")) not in HEADING_COLORS]
-            for idx, ann in enumerate(content_annotations):
-                ann.section = self.annotation_section(parser, content_raws[idx])
+        heading_positions: list[tuple] | None = None
+        if has_toc and parser:
+            # Try font-based detection first (returns 5-tuples with x-coord)
+            heading_positions = parser._detect_headings_by_font()
+            if not heading_positions:
+                # Fallback to text search (returns 4-tuples without x-coord)
+                heading_positions = parser.get_heading_positions()
+            self._assign_sections_by_reading_order(content_annotations, heading_positions, parser)
         else:
             self._assign_sections_from_headings(all_annotations, heading_color_map)
 
         outline: list[str] = []
-        if has_toc and parser:
-            for _, items in sorted(parser.sections.items()):
-                for _, _, title in items:
-                    if title not in outline:
-                        outline.append(title)
+        if heading_positions is not None:
+            for h in heading_positions:
+                title = h[3] if len(h) == 5 else h[2]
+                if title not in outline:
+                    outline.append(title)
         for ann in heading_annotations:
             title = (ann.text or ann.comment or "").strip()
             if title and title not in outline:
                 outline.append(title)
 
         for ann in content_annotations:
-            ann.text = clean_annotation_text(ann.text)
+            ann.text = (ann.text or "").strip()
+
+        self._apply_ai_cleaning(paper, stable_key, content_annotations)
 
         all_annotations = content_annotations + heading_annotations
         note_path = self.paper_dir / note_filename
@@ -398,7 +596,8 @@ class Exporter:
         existing_annotations: dict[str, str] = {}
         if note_path.exists():
             existing_content = note_path.read_text()
-            existing_annotations = parse_annotation_markers(existing_content)
+            if not self.ai_cleaner:
+                existing_annotations = parse_annotation_markers(existing_content)
 
         content = self.renderer.render_paper(
             paper,
@@ -419,6 +618,7 @@ class Exporter:
         self.state.update_paper(
             stable_key,
             {
+                **(self.state.get_paper(stable_key) or {}),
                 "hash": digest,
                 "updated_at": time.time(),
                 "note_path": str(note_path),

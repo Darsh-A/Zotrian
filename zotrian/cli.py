@@ -58,26 +58,61 @@ def get_watch_signature(db_path: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(signature)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--config", default="zotrian.json", help="Path to the Zotrian config file.")
-    common.add_argument("--vault", help="Override the Obsidian vault path from the config file.")
-    common.add_argument("--db", help="Override the Zotero database path from the config file.")
-    common.add_argument("--storage", help="Override the Zotero storage path from the config file.")
+def add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", default="zotrian.json", help="Path to the Zotrian config file.")
+    parser.add_argument("--vault", help="Override the Obsidian vault path from the config file.")
+    parser.add_argument("--db", help="Override the Zotero database path from the config file.")
+    parser.add_argument("--storage", help="Override the Zotero storage path from the config file.")
+    ai_group = parser.add_mutually_exclusive_group()
+    ai_group.add_argument(
+        "--ai",
+        dest="ai_mode",
+        action="store_true",
+        default=None,
+        help="Enable AI cleaning for note content using the configured provider.",
+    )
+    ai_group.add_argument(
+        "--no-ai",
+        dest="ai_mode",
+        action="store_false",
+        default=None,
+        help="Disable AI cleaning even if it is enabled in the config file.",
+    )
 
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zotrian",
         description="Convert Zotero annotations into Obsidian markdown notes.",
-        parents=[common],
     )
+    add_common_args(parser)
+
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    convert_parser = subparsers.add_parser("convert", help="Export notes from Zotero into Obsidian.", parents=[common])
+    convert_parser = subparsers.add_parser("convert", help="Export notes from Zotero into Obsidian.")
+    add_common_args(convert_parser)
     convert_parser.add_argument("--paper", help="Filter papers by title, citation key, or Zotero key.")
 
-    watch_parser = subparsers.add_parser("watch", help="Watch Zotero for changes and keep notes in sync.", parents=[common])
+    convert_ai_parser = subparsers.add_parser(
+        "convert-ai",
+        help="Export notes using AI-cleaned annotation content.",
+    )
+    add_common_args(convert_ai_parser)
+    convert_ai_parser.add_argument("--paper", help="Filter papers by title, citation key, or Zotero key.")
+    convert_ai_parser.set_defaults(ai_mode=True)
+
+    watch_parser = subparsers.add_parser("watch", help="Watch Zotero for changes and keep notes in sync.")
+    add_common_args(watch_parser)
     watch_parser.add_argument("--paper", help="Filter watched exports by title, citation key, or Zotero key.")
+
+    watch_ai_parser = subparsers.add_parser(
+        "watch-ai",
+        help="Watch Zotero for changes and keep AI-cleaned notes in sync.",
+    )
+    add_common_args(watch_ai_parser)
+    watch_ai_parser.add_argument("--paper", help="Filter watched exports by title, citation key, or Zotero key.")
+    watch_ai_parser.set_defaults(ai_mode=True)
 
     return parser
 
@@ -89,6 +124,8 @@ def apply_overrides(config: AppConfig, args: argparse.Namespace) -> AppConfig:
         config.zotero.database_path = Path(args.db).expanduser().resolve()
     if args.storage:
         config.zotero.storage_path = Path(args.storage).expanduser().resolve()
+    if getattr(args, "ai_mode", None) is not None:
+        config.ai.enabled = bool(args.ai_mode)
     return config
 
 
@@ -177,8 +214,8 @@ def main() -> int:
     config = apply_overrides(load_config(Path(args.config)), args)
     exporter = Exporter(config)
 
-    if args.command == "convert":
+    if args.command in {"convert", "convert-ai"}:
         return run_convert(exporter, args.paper)
-    if args.command == "watch":
+    if args.command in {"watch", "watch-ai"}:
         return run_watch(exporter, args.paper, config)
     raise RuntimeError(f"Unsupported command: {args.command}")

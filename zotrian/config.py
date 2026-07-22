@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,10 +65,27 @@ class WatchSettings:
 
 
 @dataclass(slots=True)
+class AISettings:
+    enabled: bool = False
+    provider: str = "ollama"
+    model: str = "qwen3:8b"
+    api_key_env: str = "OLLAMA_HOST"
+    batch_size: int = 20
+    max_output_tokens: int = 2048
+    temperature: float = 0.2
+    request_timeout_seconds: int = 45
+
+    @property
+    def api_key(self) -> str:
+        return os.environ.get(self.api_key_env, "").strip()
+
+
+@dataclass(slots=True)
 class AppConfig:
     zotero: ZoteroSettings
     obsidian: ObsidianSettings
     watch: WatchSettings
+    ai: AISettings
     state_path: Path
     config_path: Path
 
@@ -93,6 +111,16 @@ def _normalize_legacy_config(raw: dict[str, Any]) -> dict[str, Any]:
             "interval_seconds": raw.get("watch_interval_seconds", 5),
             "debounce_seconds": raw.get("watch_debounce_seconds", 2),
         },
+        "ai": {
+            "enabled": raw.get("ai_enabled", False),
+            "provider": raw.get("ai_provider", "ollama"),
+            "model": raw.get("ai_model", "qwen3:8b"),
+            "api_key_env": raw.get("ai_api_key_env", "OLLAMA_HOST"),
+            "batch_size": raw.get("ai_batch_size", 20),
+            "max_output_tokens": raw.get("ai_max_output_tokens", 2048),
+            "temperature": raw.get("ai_temperature", 0.2),
+            "request_timeout_seconds": raw.get("ai_request_timeout_seconds", 120),
+        },
         "state_path": raw.get("state_path", ".zotrian-state.json"),
     }
 
@@ -107,6 +135,7 @@ def load_config(config_path: Path) -> AppConfig:
     zotero_raw = normalized.get("zotero", {})
     obsidian_raw = normalized.get("obsidian", {})
     watch_raw = normalized.get("watch", {})
+    ai_raw = normalized.get("ai", {})
 
     database_path = _resolve_path(zotero_raw.get("database_path"), base_dir) or _discover_zotero_database()
     if database_path is None:
@@ -142,6 +171,16 @@ def load_config(config_path: Path) -> AppConfig:
         watch=WatchSettings(
             interval_seconds=int(watch_raw.get("interval_seconds", 5)),
             debounce_seconds=int(watch_raw.get("debounce_seconds", 2)),
+        ),
+        ai=AISettings(
+            enabled=bool(ai_raw.get("enabled", False)),
+            provider=str(ai_raw.get("provider", "gemini")),
+            model=str(ai_raw.get("model", "gemini-2.5-flash-lite")),
+            api_key_env=str(ai_raw.get("api_key_env", "GEMINI_API_KEY")),
+            batch_size=max(int(ai_raw.get("batch_size", 20)), 1),
+            max_output_tokens=max(int(ai_raw.get("max_output_tokens", 2048)), 128),
+            temperature=float(ai_raw.get("temperature", 0.2)),
+            request_timeout_seconds=max(int(ai_raw.get("request_timeout_seconds", 45)), 5),
         ),
         state_path=state_path,
         config_path=config_path.expanduser().resolve(),
